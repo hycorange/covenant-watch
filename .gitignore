@@ -5,3 +5,4 @@ contracts/evm/cache/
 contracts/evm/lib/
 my-workflow/binary.wasm
 .env
+my-workflow/.cre_build_tmp.js

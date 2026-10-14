@@ -18,7 +18,20 @@ reads that flag and halts transfers.
 | 4.02 | Non-reliance on prior financial statements | BREACH | 3 |
 | 1.01, 1.02, 2.03, 2.06, 3.03, 4.01, 5.01 | Material agreements, impairment, holder rights, auditor change, change of control | WATCH | — |
 
+## Status (2026-10-15)
+
+- **Simulated on CRE (staging target) against live SEC EDGAR**: `cre workflow simulate` fetched real
+  `data.sec.gov` submissions and ran the full handler. Output: [docs/simulate-2026-10-15.txt](docs/simulate-2026-10-15.txt).
+- **Local contract demo**: anvil + forge deploy of CovenantRegistry + TokenizedNote, then a report built from a
+  recorded real 8-K (Petros Pharmaceuticals, CIK 1815903, accession 0001104659-26-112399, Items 1.03 + 2.04,
+  filed 2026-09-30) is delivered through `onReport`, and note transfers halt. Output:
+  [docs/local-demo-2026-10-15.txt](docs/local-demo-2026-10-15.txt).
+- **Deployment pending**: deploy access to a Chainlink DON has been requested (`cre account access`) and is awaiting
+  approval. Registry addresses in `config.*.json` are placeholders until then.
+
 ## Architecture
+
+![Architecture](docs/architecture.png)
 
 ```mermaid
 flowchart LR
@@ -74,15 +87,32 @@ and the fallback is used. For production, use confidential HTTP / Vault DON secr
 ```bash
 cd my-workflow && bun install && bun test        # 21 tests (edgar, workflow, LLM/fallback)
 cd ../contracts/evm && forge test                # 7 tests
-# simulate (requires a CRE account login; pending):
-cre workflow simulate my-workflow --target staging-settings
+cre workflow simulate my-workflow --target staging-settings   # see docs/simulate-2026-10-15.txt
 # with LLM: set LLM_API_KEY_VAR in .env (gitignored) and "llm.enabled": true
 ```
 
+## Run the demo
+
+```bash
+# 1. CRE simulation against live EDGAR (needs `cre login`)
+cre workflow simulate my-workflow --target staging-settings
+
+# 2. Local contract demo (needs Foundry + bun; starts and stops its own anvil on :8545)
+./scripts/local-demo.sh
+```
+
+`scripts/local-demo.sh` deploys both contracts, makes a normal transfer, then encodes the recorded EDGAR fixture
+`fixtures/edgar-petros-CIK0001815903.json` with the workflow's own `eightKs` / `pickEvent` /
+`encodeLegalEventReport` code (`scripts/encode-fixture.ts`). An anvil account plays the KeystoneForwarder and calls
+`onReport(metadata, report)`. The script then shows `isBreached = true`, that a transfer reverts with
+`TransfersHalted(1815903)`, that a non-forwarder caller is rejected, that a duplicate report is ignored, and that the
+trustee's `cure()` resumes transfers.
+
 ## Limitations
 
-- **Simulate and deploy are pending a CRE account.** Everything has been verified with unit tests and
-  SDK mocks only. The registry address in the configs is a placeholder.
+- **Not deployed yet.** The workflow has been simulated, not deployed, so the simulation's EVM write did not
+  reach a live registry. The on-chain path was shown on a local anvil chain with an account standing in for the
+  KeystoneForwarder. Deployment is pending Chainlink deploy-access approval.
 - The workflow uses EDGAR `filings.recent` only and only looks at item codes. It does not read the filing text, so
   it can't tell whether an 8-K actually concerns the noted debt.
 - The lookback window and the per-issuer "most severe" reduction mean at most one report per issuer per tick.

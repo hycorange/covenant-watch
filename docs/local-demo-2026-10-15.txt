@@ -1,0 +1,39 @@
+# CovenantWatch local contract demo — 2026-10-15 08:35 JST — ./scripts/local-demo.sh
+# forge forge Version: 1.8.5
+
+== Deploy CovenantRegistry (forwarder = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8)
+CovenantRegistry: 0x5FbDB2315678afecb367f032d93F642f64180aa3
+
+== Deploy TokenizedNote for issuer CIK 1815903
+TokenizedNote:    0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+
+== Before breach: transfer 10 NOTE to 0x90F79bf6EB2c4f870365E785982E1f101E93b906
+status               1 (success)
+isBreached(1815903) = false
+holder balance    = 10000000000000000000 [1e19]
+
+== Encode report from recorded EDGAR fixture (fixtures/edgar-petros-CIK0001815903.json) with the workflow's own code
+# Petros Pharmaceuticals, Inc. (CIK 0001815903) 8-K 0001104659-26-112399 filed 20260930 items 1.03,2.04,5.02 severity 3
+report = 0x00000000000000000000000000000000000000000000000000000000001bb55fb40b3997f82d180c6da807957bf42d33ff0873209b9b43fd4e79cc47bb3256e300000000000000000000000000000000000000000000000000000000013528420000000000000000000000000000000000000000000000000000000000020104000000000000000000000000000000000000000000000000000000000000000300000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000014303030313130343635392d32362d313132333939000000000000000000000000
+
+== Forwarder delivers report: onReport(metadata, report)
+status               1 (success)
+isBreached(1815903) = true
+eventCount(1815903) = 1
+transfersHalted  = true
+
+== Non-forwarder cannot write a report
+InvalidSender(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266, 0x70997970C51812dc3A010C7d01b50e0d17dc79C8)
+
+== After breach: transfer attempt
+transfer reverted: custom error 0x343735ac = 0x343735ac TransfersHalted(1815903)
+
+== Duplicate delivery is idempotent
+status               1 (success)
+eventCount(1815903) = 1
+
+== Trustee cures (waiver) -> transfers resume
+status               1 (success)
+status               1 (success)
+
+DEMO OK

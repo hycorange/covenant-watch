@@ -1,0 +1,7 @@
+*.env
+node_modules/
+contracts/evm/out/
+contracts/evm/cache/
+contracts/evm/lib/
+my-workflow/binary.wasm
+.env

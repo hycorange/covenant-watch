@@ -1,0 +1,13 @@
+{
+  "schedule": "0 0 */6 * * *",
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "registryAddress": "0x0000000000000000000000000000000000000001",
+  "gasLimit": "400000",
+  "userAgent": "CovenantWatch (Orange Soda) 49815085+hycorange@users.noreply.github.com",
+  "lookbackDays": 7,
+  "breachItems": ["1.03", "2.04", "3.01", "4.02"],
+  "watchItems": ["1.01", "1.02", "2.03", "2.06", "3.03", "4.01", "5.01"],
+  "issuers": [
+    { "cik": "320193", "name": "Apple Inc." }
+  ]
+}

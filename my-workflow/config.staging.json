@@ -5,9 +5,31 @@
   "gasLimit": "400000",
   "userAgent": "CovenantWatch (Orange Soda) 49815085+hycorange@users.noreply.github.com",
   "lookbackDays": 7,
-  "breachItems": ["1.03", "2.04", "3.01", "4.02"],
-  "watchItems": ["1.01", "1.02", "2.03", "2.06", "3.03", "4.01", "5.01"],
+  "breachItems": [
+    "1.03",
+    "2.04",
+    "3.01",
+    "4.02"
+  ],
+  "watchItems": [
+    "1.01",
+    "1.02",
+    "2.03",
+    "2.06",
+    "3.03",
+    "4.01",
+    "5.01"
+  ],
+  "llm": {
+    "enabled": false,
+    "url": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-4o-mini",
+    "secretId": "LLM_API_KEY"
+  },
   "issuers": [
-    { "cik": "320193", "name": "Apple Inc." }
+    {
+      "cik": "320193",
+      "name": "Apple Inc."
+    }
   ]
 }

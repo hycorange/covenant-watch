@@ -32,6 +32,7 @@ import {
 } from 'viem'
 import { z } from 'zod'
 import { CovenantRegistryABI } from '../contracts/abi/CovenantRegistry'
+import { type Assessment, buildLlmRequest, parseLlmResponse, qualifyingItems, ruleAssessment } from './assess'
 import {
 	cik10,
 	DEFAULT_BREACH_ITEMS,
@@ -58,6 +59,15 @@ export const configSchema = z.object({
 	lookbackDays: z.number().int().min(1).max(365).default(7),
 	breachItems: z.array(z.string()).default(DEFAULT_BREACH_ITEMS),
 	watchItems: z.array(z.string()).default(DEFAULT_WATCH_ITEMS),
+	/** Optional LLM severity/summary (advisory only). API key comes from CRE secrets, never config. */
+	llm: z
+		.object({
+			enabled: z.boolean().default(false),
+			url: z.string().default('https://api.openai.com/v1/chat/completions'),
+			model: z.string().default('gpt-4o-mini'),
+			secretId: z.string().default('LLM_API_KEY'),
+		})
+		.default({}),
 	issuers: z.array(z.object({ cik: z.string(), name: z.string() })).min(1),
 })
 export type Config = z.infer<typeof configSchema>
@@ -127,6 +137,46 @@ export const describeEvent = (cik: string, name: string, ev: IssuerEvent): strin
 	return `${Severity[ev.severity]} ${name} (CIK ${cik10(cik)}) 8-K ${ev.accession} filed ${ev.filingDate}: ${items} — ${filingUrl(cik, ev)}`
 }
 
+export const llmConsensus = ConsensusAggregationByFields<{ severity: number; summary: string }>({
+	severity: identical,
+	summary: identical,
+})
+
+type LlmArgs = { url: string; apiKey: string; payload: string }
+const fetchLlm = (sendRequester: HTTPSendRequester, a: LlmArgs) => {
+	const resp = sendRequester
+		.sendRequest({
+			url: a.url,
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${a.apiKey}` },
+			body: Buffer.from(a.payload).toString('base64'),
+		})
+		.result()
+	if (resp.statusCode !== 200) throw new Error(`LLM HTTP ${resp.statusCode}`)
+	return parseLlmResponse(new TextDecoder().decode(resp.body))
+}
+
+/**
+ * Optional LLM step for qualifying items (1.03/2.04/3.01/4.02). Falls back to the rule-based result when disabled,
+ * no API key secret, HTTP/parse error, or the nodes don't reach consensus on the output. Never throws.
+ */
+export const assessEvent = (runtime: Runtime<Config>, http: InstanceType<typeof cre.capabilities.HTTPClient>, issuer: { cik: string; name: string }, ev: IssuerEvent): Assessment | null => {
+	if (qualifyingItems(ev.itemsMask).length === 0) return null
+	const fallback = ruleAssessment(issuer.name, ev.accession, ev.itemsMask)
+	const llm = runtime.config.llm
+	if (!llm?.enabled) return fallback
+	try {
+		const apiKey = runtime.getSecret({ id: llm.secretId }).result().value
+		if (!apiKey) throw new Error('empty API key')
+		const payload = JSON.stringify(buildLlmRequest(llm.model, issuer.name, issuer.cik, ev))
+		const r = http.sendRequest(runtime, fetchLlm, llmConsensus)({ url: llm.url, apiKey, payload }).result()
+		return { source: 'llm', ...r }
+	} catch (e) {
+		runtime.log(`${issuer.name}: LLM step unavailable (${(e as Error).message}); using rule-based assessment`)
+		return fallback
+	}
+}
+
 const evmClientFor = (config: Config): EVMClient => {
 	const network = getNetwork({ chainFamily: 'evm', chainSelectorName: config.chainSelectorName, isTestnet: true })
 	if (!network) throw new Error(`Network not found: ${config.chainSelectorName}`)
@@ -183,6 +233,8 @@ export const onCron = (runtime: Runtime<Config>, payload?: CronPayload): string 
 			continue
 		}
 		runtime.log(describeEvent(issuer.cik, issuer.name, ev))
+		const a = assessEvent(runtime, http, issuer, ev)
+		if (a) runtime.log(`${issuer.name}: assessment[${a.source}] severity ${a.severity}/5: ${a.summary}`)
 		const report = runtime.report(prepareReportRequest(encodeLegalEventReport(issuer.cik, ev))).result()
 		const w = evm.writeReport(runtime, { receiver: registry, report, gasConfig: { gasLimit: c.gasLimit } }).result()
 		if (w.txStatus !== TxStatus.SUCCESS) throw new Error(`writeReport failed for ${issuer.name}: ${w.errorMessage || w.txStatus}`)

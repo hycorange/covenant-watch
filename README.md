@@ -1,183 +1,90 @@
-# Circuit Breaker — CRE Starter Template (TypeScript)
+# CovenantWatch
 
-Monitor on-chain events for anomalies, automatically pause contracts when thresholds are breached.
+**SEC EDGAR 8-K legal-event circuit breaker for tokenized notes, built on Chainlink CRE.**
 
-**⚠️ DISCLAIMER**
+## Problem
 
-This template is an educational example to demonstrate how to interact with Chainlink systems, products, and services. It is provided **"AS IS"** and **"AS AVAILABLE"** without warranties of any kind, has **not** been audited, and may omit checks or error handling for clarity. **Do not use this code in production** without performing your own audits and applying best practices. Neither Chainlink Labs, the Chainlink Foundation, nor Chainlink node operators are responsible for unintended outputs generated due to errors in code.
+Tokenized debt (notes, bonds, private credit) keeps trading on-chain even after the issuer has told the SEC it
+filed for bankruptcy, had its debt accelerated, got a delisting notice, or that its financials can't be relied on.
+Those facts show up first in a public Form 8-K on EDGAR, often hours before anything moves on-chain. CovenantWatch
+watches EDGAR from a decentralized oracle network and trips an on-chain "event of default" flag. A note contract
+reads that flag and halts transfers.
 
----
-
-## Overview
-
-This template demonstrates the **dual-trigger circuit breaker** pattern using Chainlink CRE (Compute Runtime Environment). It combines a **LogTrigger** (react to price update events) with a **Cron trigger** (periodic health checks) to provide comprehensive protocol safety monitoring.
-
-### Use Cases
-
-- **DeFi protocol safety**: Price deviation > threshold -> pause deposits
-- **Price deviation monitoring**: Oracle update deviates > 10% from last known -> pause trading
-- **Bridge anomaly**: Unusual bridge volume -> pause bridge contract
-- **Treasury drain**: Large unexpected outflows -> freeze treasury
-- **NFT mint abuse**: Mint rate exceeds threshold -> pause minting
+| 8-K item | Meaning | Default class | Rule severity (1-5) |
+|---|---|---|---|
+| 1.03 | Bankruptcy or receivership | BREACH | 5 |
+| 2.04 | Triggering events that accelerate a financial obligation | BREACH | 4 |
+| 3.01 | Delisting / listing-rule failure | BREACH | 3 |
+| 4.02 | Non-reliance on prior financial statements | BREACH | 3 |
+| 1.01, 1.02, 2.03, 2.06, 3.03, 4.01, 5.01 | Material agreements, impairment, holder rights, auditor change, change of control | WATCH | — |
 
 ## Architecture
 
-```
-                    ┌──────────────────────┐
-                    │  Protocol Contract   │
-                    │  emits PriceUpdated  │
-                    └──────────┬───────────┘
-                               │ events
-                               v
-┌─────────────────────────────────────────────────────────────────┐
-│                          CRE DON                                │
-│                                                                 │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐    │
-│  │  LogTrigger  │-->│  Decode      │-->│  Anomaly Check   │    │
-│  │  (events)    │   │  Event Data  │   │  deviation > X%? │    │
-│  └──────────────┘   └──────────────┘   └────────┬─────────┘    │
-│                                                  │              │
-│  ┌──────────────┐                                │              │
-│  │  Cron        │--> Health check ───────────────┤              │
-│  │  (periodic)  │    (read state, verify ok)     │              │
-│  └──────────────┘                                │              │
-│                                        ┌─────────v──────────┐  │
-│                                        │   ANOMALY?         │  │
-│                                        │   YES -> Pause     │  │
-│                                        │   NO  -> Log OK    │  │
-│                                        └─────────┬──────────┘  │
-│                                                  │              │
-└──────────────────────────────────────────────────┼──────────────┘
-                                                   │
-                                        ┌──────────v──────────┐
-                                        │  KeystoneForwarder  │
-                                        │  -> _processReport  │
-                                        │    (pause protocol) │
-                                        └─────────────────────┘
+```mermaid
+flowchart LR
+  Cron[Cron trigger<br/>every 6h] --> HTTP[HTTP capability<br/>data.sec.gov submissions JSON]
+  HTTP --> Reduce[Each node: reduce to<br/>most severe new 8-K]
+  Reduce --> Cons{Consensus<br/>all fields identical}
+  Cons -->|none| Clear[log: clear]
+  Cons -->|event| Seen[EVM read<br/>CovenantRegistry.seen]
+  Seen -->|already recorded| Skip[skip]
+  Seen -->|new| LLM[Optional LLM<br/>severity + summary]
+  LLM -. disabled / no key / error / no consensus .-> Rule[Rule-based fallback]
+  LLM --> Report
+  Rule --> Report[runtime.report<br/>signed report]
+  Report --> Fwd[KeystoneForwarder] --> Reg[CovenantRegistry<br/>_processReport]
+  Reg -->|BREACH| Note[TokenizedNote<br/>transfers halted]
 ```
 
-## Components
+- `my-workflow/edgar.ts` — pure, unit-tested EDGAR parsing: 8-K item masks, severity, window selection, URLs.
+- `my-workflow/workflow.ts` — CRE handler: cron → HTTP (with SEC-required User-Agent) → `ConsensusAggregationByFields`
+  → registry `seen()` read (idempotent across ticks) → optional LLM assessment → `writeReport`.
+- `my-workflow/assess.ts` — LLM request/response handling and the deterministic rule-based fallback.
 
-### CRE Workflow (`my-workflow/`)
+## Contracts (`contracts/evm/src`)
 
-Two triggers work together:
+- **CovenantRegistry.sol** (`ReceiverTemplate`, only the CRE forwarder can deliver reports). Decodes
+  `(uint64 cik, bytes32 accessionHash, uint32 filingDate, uint32 itemsMask, uint8 severity, string accession)`,
+  dedupes by accession hash, and stores `lastEvent`/`eventCount`. It emits `LegalEventRecorded`, and for BREACH
+  severity it also emits `BreachFlagged` and sets `isBreached(cik)`. The owner can `cure(cik, note)`, for example
+  after a waiver.
+- **TokenizedNote.sol**: a minimal note token bound to one issuer CIK. `transfer` reverts while
+  `registry.isBreached(cik)` is true.
 
-**Trigger 0 — LogTrigger (event-driven):**
-1. Fires when `ProtocolWithBreaker` emits a `PriceUpdated` event
-2. Decodes the event (newPrice, oldPrice, timestamp) via generated typed bindings
-3. Reads on-chain state (paused?, tripCount, threshold)
-4. Calculates price deviation in basis points
-5. If deviation > threshold: trips the circuit breaker (pauses protocol on-chain)
+## LLM step + fallback
 
-**Trigger 1 — Cron (periodic health check):**
-1. Fires every 10 minutes (configurable)
-2. Reads protocol state (paused, lastPrice, lastUpdate, tripCount)
-3. Logs the current status for monitoring
+Turn this on with `"llm": { "enabled": true, ... }` in `config.*.json`. It is off by default. It runs only for
+qualifying items 1.03 / 2.04 / 3.01 / 4.02. The workflow POSTs an OpenAI-compatible chat completion
+(`temperature: 0`, JSON output) through the CRE HTTP capability. The nodes must agree exactly on
+`{severity, summary}`.
 
-### Consumer Contract (`contracts/evm/src/ProtocolWithBreaker.sol`)
+- The API key comes **only** from CRE secrets (`LLM_API_KEY`, mapped in `secrets.yaml` to env var
+  `LLM_API_KEY_VAR`). It is never placed in config or committed, and `.env` is gitignored.
+- The workflow falls back to a deterministic **rule-based** result in these cases: the step is disabled, the secret
+  is missing, there is an HTTP or parse error, or the nodes don't reach consensus. The rule-based result uses a fixed
+  severity per item code (table above) and a templated summary.
+- The assessment is **advisory**. It is logged and is not part of the on-chain report. A model therefore can never
+  flag or un-flag a breach by itself. The on-chain severity always comes from the rule-based classification.
 
-A protocol contract with built-in circuit breaker:
+Note: LLM outputs are often not byte-identical across nodes, even at temperature 0. In that case consensus fails
+and the fallback is used. For production, use confidential HTTP / Vault DON secrets.
 
-- `updatePrice(uint256)` — simulates price updates, emits `PriceUpdated` events
-- `paused()` — whether the protocol is currently paused
-- `lastPrice()`, `lastPriceTimestamp()` — current price state
-- `priceDeviationThresholdBps()` — deviation threshold in basis points (1000 = 10%)
-- `tripCount()` — how many times the breaker has been tripped
-- `_processReport(bytes)` — decodes action (PAUSE/UNPAUSE) and reason, updates state
-
-## Getting Started
-
-A demo `ProtocolWithBreaker` contract is pre-deployed on Sepolia with an anomalous price event already emitted — this template works out of the box.
-
-### Prerequisites
-
-- [Bun](https://bun.sh/) runtime installed
-- [CRE CLI](https://docs.chain.link/cre) installed
-
-### 1. Install Dependencies
+## Build / test / simulate
 
 ```bash
-cd my-workflow && bun install && cd ..
-cd contracts && bun install && cd ..
-```
-
-### 2. Run Tests
-
-```bash
-cd my-workflow && bun test
-```
-
-### 3. Simulate
-
-**Cron health check (trigger index 1):**
-```bash
+cd my-workflow && bun install && bun test        # 21 tests (edgar, workflow, LLM/fallback)
+cd ../contracts/evm && forge test                # 7 tests
+# simulate (requires a CRE account login; pending):
 cre workflow simulate my-workflow --target staging-settings
+# with LLM: set LLM_API_KEY_VAR in .env (gitignored) and "llm.enabled": true
 ```
 
-**LogTrigger with pre-emitted anomalous price event (trigger index 0):**
-```bash
-cre workflow simulate my-workflow --target staging-settings --non-interactive \
-  --trigger-index 0 \
-  --evm-tx-hash 0x98dfb56db57cb0689e5e4092949d41431a283f52128066bc941b0c219d3f6203 \
-  --evm-event-index 0
-```
+## Limitations
 
-### 4. Emit Your Own Price Events
-
-Emit a normal price update (within 10% threshold):
-```bash
-cast send 0xaCb13C9940cB61367b45eEd504E410D4B4d7A6e4 \
-  "updatePrice(uint256)" 950000000000000000 \
-  --private-key $CRE_ETH_PRIVATE_KEY \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
-```
-
-Emit an anomalous price update (>10% deviation):
-```bash
-cast send 0xaCb13C9940cB61367b45eEd504E410D4B4d7A6e4 \
-  "updatePrice(uint256)" 100000000000000000 \
-  --private-key $CRE_ETH_PRIVATE_KEY \
-  --rpc-url https://ethereum-sepolia-rpc.publicnode.com
-```
-
-Then simulate with the resulting tx hash:
-```bash
-cre workflow simulate my-workflow --target staging-settings --non-interactive \
-  --trigger-index 0 \
-  --evm-tx-hash <YOUR_TX_HASH> \
-  --evm-event-index 0
-```
-
-### 5. Deploy Your Own Contract (Optional)
-
-Deploy `contracts/evm/src/ProtocolWithBreaker.sol` using Foundry:
-
-```bash
-forge create src/ProtocolWithBreaker.sol:ProtocolWithBreaker --broadcast \
-  --private-key <KEY> --rpc-url <RPC> \
-  --constructor-args 0x15fc6ae953e024d975e77382eeec56a9101f9f88 1000000000000000000 1000
-```
-
-Constructor arguments:
-- `forwarder`: CRE KeystoneForwarder on Sepolia (`0x15fc6ae953e024d975e77382eeec56a9101f9f88`)
-- `_initialPrice`: Initial price in wei (e.g., `1000000000000000000` = 1e18)
-- `_deviationThresholdBps`: Deviation threshold in basis points (`1000` = 10%)
-
-## Customization
-
-- **Change the threshold**: Deploy with a different `_deviationThresholdBps` value
-- **Change the schedule**: Edit `schedule` in `config.staging.json`
-- **Add webhook alerts**: Extend `tripCircuitBreaker()` with `cre.capabilities.HTTPClient` POST to Slack/PagerDuty
-- **Monitor different events**: Change `logTriggerPriceUpdated()` to monitor other contract events
-- **Add unpause logic**: Create a separate workflow or cron handler that calls ACTION_UNPAUSE when conditions normalize
-
-## Security
-
-- The contract is a **demo** — audit and customize before production use
-- `ReceiverTemplate` validates that only CRE Forwarder can call `onReport()`
-- The circuit breaker is **one-way by default** — only CRE can unpause via ACTION_UNPAUSE report
-- Never commit `.env` files or secrets
-
-## License
-
-MIT
+- **Simulate and deploy are pending a CRE account.** Everything has been verified with unit tests and
+  SDK mocks only. The registry address in the configs is a placeholder.
+- The workflow uses EDGAR `filings.recent` only and only looks at item codes. It does not read the filing text, so
+  it can't tell whether an 8-K actually concerns the noted debt.
+- The lookback window and the per-issuer "most severe" reduction mean at most one report per issuer per tick.
+- SEC fair-access rules apply (≤10 req/s, descriptive User-Agent).
+- `cure()` is owner-controlled (trusted trustee), and the contracts are unaudited demo code.

@@ -118,3 +118,7 @@ trustee's `cure()` resumes transfers.
 - The lookback window and the per-issuer "most severe" reduction mean at most one report per issuer per tick.
 - SEC fair-access rules apply (≤10 req/s, descriptive User-Agent).
 - `cure()` is owner-controlled (trusted trustee), and the contracts are unaudited demo code.
+
+## License
+
+MIT. The contracts are unaudited demo code; do not use them to hold real value.
